@@ -1,151 +1,91 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+import pdal
+import json
+import os
+import tempfile
+import zipfile
+import io
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+st.set_page_config(page_title="LAS/LAZ Denoiser", layout="centered")
+
+st.title("🌲 Point Cloud Noise Filter (PDAL)")
+
+# --- Upload files ---
+uploaded_files = st.file_uploader(
+    "Drag and drop your .las or .laz files",
+    type=["las", "laz"],
+    accept_multiple_files=True
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+st.sidebar.header("Noise Filter Parameters")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# --- PDAL Noise filter parameters with defaults ---
+mean_k = st.sidebar.number_input("Mean K (neighbors)", min_value=1, value=8)
+multiplier = st.sidebar.number_input("Multiplier", min_value=0.1, value=2.5)
+method = st.sidebar.selectbox("Method", ["statistical", "radius"], index=0)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+if uploaded_files:
+    st.write("### Uploaded Files")
+    for file in uploaded_files:
+        st.write(f"- {file.name}")
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    if st.button("Run Noise Filter"):
+        output_files = []
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+        for file in uploaded_files:
+            # Create temp input
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.name)[1]) as tmp_in:
+                tmp_in.write(file.read())
+                tmp_in.flush()
+                input_path = tmp_in.name
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+            # Output file path
+            base, ext = os.path.splitext(file.name)
+            output_name = f"{base}_denoise{ext}"
+            output_path = os.path.join(tempfile.gettempdir(), output_name)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+            # PDAL pipeline
+            pipeline_json = {
+                "pipeline": [
+                    input_path,
+                    {
+                        "type": "filters.outlier",
+                        "method": method,
+                        "mean_k": mean_k,
+                        "multiplier": multiplier
+                    },
+                    output_path
+                ]
+            }
 
-    return gdp_df
+            pipeline = pdal.Pipeline(json.dumps(pipeline_json))
+            pipeline.execute()
 
-gdp_df = get_gdp_data()
+            output_files.append((output_name, output_path))
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+        st.success("✅ Noise filtering complete!")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+        # --- Individual downloads ---
+        st.write("### Download Processed Files")
+        for name, path in output_files:
+            with open(path, "rb") as f:
+                st.download_button(
+                    label=f"⬇️ Download {name}",
+                    data=f,
+                    file_name=name,
+                    mime="application/octet-stream"
+                )
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+        # --- ZIP all processed files ---
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zipf:
+            for name, path in output_files:
+                zipf.write(path, arcname=name)
+        zip_buffer.seek(0)
 
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+        st.download_button(
+            label="⬇️ Download All as ZIP",
+            data=zip_buffer,
+            file_name="denoised_pointclouds.zip",
+            mime="application/zip"
         )
